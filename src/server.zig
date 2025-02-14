@@ -10,9 +10,16 @@ pub const Config = struct {
 };
 
 pub const Handler = *const fn (request: *std.http.Server.Request) void;
+const BoundHandler = *fn (*const anyopaque, *std.http.Server.Request) void;
+
+// "inspired" by zap
+const Callback = union(enum) {
+    bound: struct { instance: usize, handler: usize },
+    unbound: Handler,
+};
 
 addr: std.net.Address,
-routes: std.StringHashMap(Handler),
+routes: std.StringHashMap(Callback),
 
 pub fn init(allocator: std.mem.Allocator, config: Config) !Self {
     const addr = std.net.Address.resolveIp(config.ip, config.port) catch {
@@ -21,8 +28,27 @@ pub fn init(allocator: std.mem.Allocator, config: Config) !Self {
     };
     return .{
         .addr = addr,
-        .routes = std.StringHashMap(Handler).init(allocator),
+        .routes = std.StringHashMap(Callback).init(allocator),
     };
+}
+
+pub fn deinit(self: *Self) void {
+    self.routes.deinit();
+}
+
+pub fn handle(self: *Self, path: []const u8, instance: *anyopaque, handler: anytype) !void {
+    if (path.len == 0) {
+        return error.EmptyPath;
+    }
+
+    if (self.routes.contains(path)) {
+        return error.AlreadyExists;
+    }
+
+    try self.routes.put(path, Callback{ .bound = .{
+        .instance = @intFromPtr(instance),
+        .handler = @intFromPtr(handler),
+    } });
 }
 
 pub fn serve(self: Self) !void {
@@ -41,11 +67,6 @@ pub fn serve(self: Self) !void {
             return error.ConnectionAcceptError;
         };
 
-        // NOTE: i could implement the use of the std lib std.Thread.Pool
-        // for these things - just for giggles
-        // docs(?) i found so far:
-        //  - https://noelmrtn.fr/posts/zig_threading/
-        //  - - https://github.com/NoelM/zig-playground/blob/main/prime_numbers_parallel/prime_std.zig
         const thread = try std.Thread.spawn(.{}, handle_connection, .{ self, connection });
         thread.detach();
     }
@@ -53,34 +74,19 @@ pub fn serve(self: Self) !void {
     std.debug.assert(false);
 }
 
-pub fn get(self: *Self, comptime route: []const u8, handler: Handler) !void {
-    try self.routes.put("GET|" ++ route, handler);
-}
-
-fn method_to_slice(method: std.http.Method) []const u8 {
-    return switch (method) {
-        .GET => "GET",
-        .PUT => "PUT",
-        .HEAD => "HEAD",
-        .POST => "POST",
-        .TRACE => "TRACE",
-        .PATCH => "PATCH",
-        .DELETE => "DELETE",
-        .CONNECT => "CONNECT",
-        .OPTIONS => "OPTIONS",
-        else => "I_DUNNO",
-    };
+inline fn method_to_slice(method: std.http.Method) []const u8 {
+    const byts = std.mem.asBytes(&@intFromEnum(method));
+    return std.mem.sliceTo(byts, 0);
 }
 
 const READ_BUFFER_SIZE = 8 * 1024;
-const WRITE_BUFFER_SIZE = 8 * 1024;
-const FILE_BUFFER_SIZE = 32 * 1024;
+// const WRITE_BUFFER_SIZE = 8 * 1024;
+// const FILE_BUFFER_SIZE = 32 * 1024;
 
 /// this will close the connection when its done
 fn handle_connection(self: Self, connection: std.net.Server.Connection) !void {
     defer connection.stream.close();
 
-    var key_buffer: [256]u8 = undefined;
     var read_buffer: [READ_BUFFER_SIZE]u8 = undefined;
     var http_server = std.http.Server.init(connection, &read_buffer);
 
@@ -93,19 +99,20 @@ fn handle_connection(self: Self, connection: std.net.Server.Connection) !void {
         connection.address,
     });
 
-    const key = switch (request.head.method) {
-        .GET => blk: {
-            @memcpy(key_buffer[0..4], "GET|");
-            @memcpy(key_buffer[4 .. 4 + request.head.target.len], request.head.target);
-            break :blk key_buffer[0 .. 4 + request.head.target.len];
-        },
-        else => key_buffer[0..1],
-    };
-
-    const route = self.routes.get(key);
+    const route = self.routes.get(request.head.target);
 
     if (route) |rte| {
-        rte(&request);
+        switch (rte) {
+            .unbound => |ub| ub(&request),
+            .bound => |b| @call(
+                .auto,
+                @as(BoundHandler, @ptrFromInt(b.handler)),
+                .{
+                    @as(*anyopaque, @ptrFromInt(b.instance)),
+                    &request,
+                },
+            ),
+        }
     } else {
         std.log.info("no route found for {s}.", .{request.head.target});
     }

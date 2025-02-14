@@ -1,53 +1,58 @@
-/// NOT USING THIS
-/// (yet), but just for reference: https://ziggit.dev/t/simple-http-server/4487
-///
 const std = @import("std");
 const http_server = @import("server.zig");
 const Template = @import("template.zig");
 
 const log = std.log;
 
-var GPA = std.heap.GeneralPurposeAllocator(.{}){};
-const allocator = GPA.allocator();
-
 pub fn main() !void {
+    var GPA = std.heap.GeneralPurposeAllocator(.{}){};
+    const allocator = GPA.allocator();
+
     var server = try http_server.init(allocator, .{});
 
-    try server.get("/", default_page);
+    var dashboard = try Dashboard.init(allocator);
+    defer dashboard.deinit();
+
+    try server.handle("/", &dashboard, &Dashboard.handle);
 
     try server.serve();
 }
 
-fn default_page(request: *std.http.Server.Request) void {
-    const txt = @embedFile("templ/index.htmx");
-    var index_templ = Template.initText(allocator, txt) catch |err| {
-        std.log.err("error loading index.htmx: {}", .{err});
-        return;
-    };
-    defer index_templ.deinit();
+const Dashboard = struct {
+    const Self = @This();
+    const htmx = @embedFile("templ/index.htmx");
 
-    var buff = std.ArrayList(u8).init(allocator);
-    defer buff.deinit();
+    template: Template,
+    allocator: std.mem.Allocator,
 
-    index_templ.render(buff.writer(), .{}) catch |err| {
-        std.log.err("error rendering index.htmx: {}", .{err});
-        return;
-    };
+    pub fn init(allocator: std.mem.Allocator) !Self {
+        return .{
+            .allocator = allocator,
+            .template = try Template.initText(allocator, htmx),
+        };
+    }
 
-    request.respond(buff.items, .{
-        .extra_headers = &.{
-            .{ .name = "content-type", .value = "text/html" },
-        },
-    }) catch |err| {
-        std.log.err("error sending response: {}", .{err});
-    };
-}
+    pub fn deinit(self: *Self) void {
+        self.template.deinit();
+    }
 
-// fn dump_xaction_file() !void {
-//     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-//     const allocator = gpa.allocator();
-//
-//     var args_it = std.process.args();
-//     _ = args_it.next();
-//     const data_dir = args_it.next() orelse "/home/loico/budget_data";
-// }
+    pub fn handle(self: *Self, request: *std.http.Server.Request) void {
+        self._handle(request) catch |err| {
+            // do some error page?
+            std.log.err("error handling request: {}", .{err});
+        };
+    }
+
+    fn _handle(self: *Self, request: *std.http.Server.Request) !void {
+        var buff = std.ArrayList(u8).init(self.allocator);
+        defer buff.deinit();
+
+        try self.template.render(buff.writer(), .{});
+
+        try request.respond(buff.items, .{
+            .extra_headers = &.{
+                .{ .name = "content-type", .value = "text/html" },
+            },
+        });
+    }
+};
