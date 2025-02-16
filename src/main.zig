@@ -1,6 +1,7 @@
 const std = @import("std");
+const Allocator = std.mem.Allocator;
 const http_server = @import("server.zig");
-const Template = @import("template.zig");
+const Template = @import("template.zig").Template;
 
 const log = std.log;
 
@@ -22,11 +23,13 @@ const Dashboard = struct {
     const Self = @This();
     const htmx = @embedFile("templ/index.htmx");
 
-    allocator: std.mem.Allocator,
+    allocator: Allocator,
+    template: Template,
 
-    pub fn init(allocator: std.mem.Allocator) !Self {
+    pub fn init(allocator: Allocator) !Self {
         return .{
             .allocator = allocator,
+            .template = try Template.fromText(allocator, htmx),
         };
     }
 
@@ -42,8 +45,12 @@ const Dashboard = struct {
     }
 
     fn _handle(self: *Self, request: *std.http.Server.Request) !void {
-        _ = self;
-        try request.respond("hello", .{
+        var buffer = std.ArrayList(u8).init(self.allocator);
+        defer buffer.deinit();
+
+        try self.template.render(void, {}, buffer.writer().any());
+
+        try request.respond(buffer.items, .{
             .extra_headers = &.{
                 .{ .name = "content-type", .value = "text/html" },
             },
