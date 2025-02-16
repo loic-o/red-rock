@@ -22,13 +22,11 @@ const Dashboard = struct {
     const Self = @This();
     const htmx = @embedFile("templ/index.htmx");
 
-    template: Template,
     allocator: std.mem.Allocator,
 
     pub fn init(allocator: std.mem.Allocator) !Self {
         return .{
             .allocator = allocator,
-            .template = try Template.initText(allocator, htmx),
         };
     }
 
@@ -44,12 +42,8 @@ const Dashboard = struct {
     }
 
     fn _handle(self: *Self, request: *std.http.Server.Request) !void {
-        var buff = std.ArrayList(u8).init(self.allocator);
-        defer buff.deinit();
-
-        try self.template.render(buff.writer(), .{});
-
-        try request.respond(buff.items, .{
+        _ = self;
+        try request.respond("hello", .{
             .extra_headers = &.{
                 .{ .name = "content-type", .value = "text/html" },
             },
