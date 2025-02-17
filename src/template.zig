@@ -6,7 +6,7 @@ const FieldType = enum {
 
 const FieldValue = union(enum) {
     Unsupported: void,
-    NotFound: void,
+    NotFound: []const u8,
     Void: void,
     Int: usize,
     Float: f32,
@@ -48,7 +48,7 @@ fn get_field_value(comptime T: type, instance: T, field_name: []const u8) FieldV
             }
         }
     }
-    return .{ .NotFound = {} };
+    return .{ .NotFound = field_name };
 }
 
 const TemplateElement = union(enum) {
@@ -74,6 +74,7 @@ const TemplateElement = union(enum) {
 pub const Template = struct {
     const Self = @This();
 
+    allocator: std.mem.Allocator,
     template: []const u8,
     elements: std.ArrayList(TemplateElement),
 
@@ -119,13 +120,28 @@ pub const Template = struct {
     pub fn deinit(self: *Self) void {
         self.elements.deinit();
     }
+
+    const SectionMarker = struct {
+        elem_idx: usize,
+        iter_idx: usize,
+    };
+
+    const SectionStack = std.SinglyLinkedList(SectionMarker);
+    const SectionNode = SectionStack.Node;
+
     pub fn render(self: Self, T: type, data: T, writer: std.io.AnyWriter) !void {
+        var stack = SectionStack{};
+
         const st_tm = std.time.microTimestamp();
-        for (self.elements.items) |elem| {
-            switch (elem) {
+        var i: usize = 0;
+        // for (self.elements.items) |elem| {
+        while (i < self.elements.items.len) {
+            switch (self.elements.items[i]) {
                 .Static => |txt| try writer.writeAll(txt),
                 .Var => |tag| {
                     switch (get_field_value(T, data, tag)) {
+                        .Void => {},
+                        .NotFound => |v| std.log.debug("field [{s}] not found.", .{v}),
                         .Int => |v| try writer.print("{}", .{v}),
                         .Float => |v| try writer.print("{d:.2}", .{v}),
                         .Bool => |v| try writer.print("{}", .{v}),
@@ -134,18 +150,46 @@ pub const Template = struct {
                             switch (v.type) {
                                 .Float => {
                                     const p = @as([*]f32, @alignCast(@constCast(@ptrCast(v.ptr))));
-                                    for (0..v.len) |i| {
-                                        if (i > 0) try writer.print(",", .{});
-                                        try writer.print("{d:.2}", .{p[i]});
+                                    for (0..v.len) |j| {
+                                        if (j > 0) try writer.print(",", .{});
+                                        try writer.print("{d:.2}", .{p[j]});
                                     }
                                 },
                             }
                         },
-                        else => std.log.info("!!{s}!! :: var of 'other' type", .{tag}),
+                        .Unsupported => std.log.err("!!{s}!! :: var of 'other' type", .{tag}),
                     }
                 },
-                else => std.log.info("can't render {} right now", .{elem}),
+                // .Iterator => {},
+                .Section => |sect| {
+                    // is this the "not first" time through here?
+                    switch (get_field_value(T, data, sect)) {
+                        .Slice => |v| {
+                            const node = try self.allocator.create(SectionNode);
+                            node.data = .{
+                                .elem_idx = i,
+                                .iter_idx = 0,
+                            };
+                            try stack.prepend(node);
+                            if (v.len == 0) {
+                                // skip rendering until the matching end
+                            }
+                            stack.prepend(node);
+                        },
+                        .Bool => |b| {
+                            if (!b) {
+                                // skip template rendering until the matching end
+                            }
+                        },
+                        else => std.log.err("unsupported section type of {s}", .{sect}),
+                    }
+                },
+                .End => |_| {
+                    // if we are in a section jump back to the beginning
+                },
+                else => std.log.err("can't render {} right now", .{self.elements.items[i]}),
             }
+            i += 1;
         }
         const el_tm = std.time.microTimestamp() - st_tm;
         std.log.debug("rendered in {}us", .{el_tm});
@@ -173,6 +217,7 @@ test "templ: void template" {
     std.testing.expect(std.mem.eql(u8, expected, output_buffer.items)) catch {
         const out = std.io.getStdOut().writer();
         try out.print("expected:\n[{s}]\ngot:\n[{s}]\n.", .{ expected, output_buffer.items });
+        return error.UnexpectedTestResult;
     };
 }
 
@@ -205,6 +250,7 @@ test "templ: basic" {
     std.testing.expect(std.mem.eql(u8, expected, output_buffer.items)) catch {
         const out = std.io.getStdOut().writer();
         try out.print("expected:\n[{s}]\ngot:\n[{s}]\n.", .{ expected, output_buffer.items });
+        return error.UnexpectedTestResult;
     };
 }
 
@@ -243,5 +289,6 @@ test "templ: slice of floats" {
     std.testing.expect(std.mem.eql(u8, expected, output_buffer.items)) catch {
         const out = std.io.getStdOut().writer();
         try out.print("expected:\n[{s}]\ngot:\n[{s}]\n.", .{ expected, output_buffer.items });
+        return error.UnexpectedTestResult;
     };
 }
