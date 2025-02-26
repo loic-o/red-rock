@@ -88,7 +88,7 @@ const TemplateElement = union(enum) {
     Section: struct { field: []const u8, children: []TemplateElement },
 };
 
-const Template = struct {
+pub const Template = struct {
     allocator: std.mem.Allocator,
     elements: []TemplateElement,
 
