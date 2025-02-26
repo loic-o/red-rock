@@ -7,9 +7,18 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
 
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="js/util.js"></script>
 </head>
 <body>
-<div>this is take one</div>
+
+    <div>this is take one</div>
+
+    <div>here is some data:</div>
+    {{#data}}
+    <ul>
+      <li>{{.}}</li>
+    </ul>
+    {{/data}}
 
 </body>
 </html>

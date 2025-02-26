@@ -1,7 +1,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const http_server = @import("server.zig");
-const Template = @import("template.zig").Template;
+const template = @import("template.zig");
 
 const log = std.log;
 
@@ -14,6 +14,7 @@ pub fn main() !void {
     var dashboard = try Dashboard.init(allocator);
     defer dashboard.deinit();
 
+    try server.handle_static("/js/util.js", @embedFile("static/util.js"));
     try server.handle("/", &dashboard, &Dashboard.handle);
 
     try server.serve();
@@ -24,12 +25,13 @@ const Dashboard = struct {
     const htmx = @embedFile("templ/index.htmx");
 
     allocator: Allocator,
-    template: Template,
+    template: template.Template,
 
     pub fn init(allocator: Allocator) !Self {
+        const templ = try template.from_text(allocator, htmx);
         return .{
             .allocator = allocator,
-            .template = try Template.fromText(allocator, htmx),
+            .template = templ,
         };
     }
 
@@ -48,7 +50,13 @@ const Dashboard = struct {
         var buffer = std.ArrayList(u8).init(self.allocator);
         defer buffer.deinit();
 
-        try self.template.render(void, {}, buffer.writer().any());
+        const Data = struct {
+            data: []const f32,
+        };
+        const data = Data{ .data = &[_]f32{ 123, 456, 789 } };
+
+        const writer = buffer.writer().any();
+        try self.template.render(data, writer);
 
         try request.respond(buffer.items, .{
             .extra_headers = &.{

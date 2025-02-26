@@ -1,294 +1,369 @@
 const std = @import("std");
 
-const FieldType = enum {
-    Float,
+const StructFieldValue = struct {
+    name: []const u8,
+    value: FieldValue,
 };
 
 const FieldValue = union(enum) {
     Unsupported: void,
-    NotFound: []const u8,
-    Void: void,
     Int: usize,
     Float: f32,
     Bool: bool,
     String: []const u8,
-    Slice: struct { ptr: [*]const u8, len: usize, type: FieldType },
-};
+    Slice: struct { allocator: std.mem.Allocator, elements: []FieldValue },
+    Struct: struct { allocator: std.mem.Allocator, fields: []StructFieldValue },
 
-fn get_field_value(comptime T: type, instance: T, field_name: []const u8) FieldValue {
-    if (@typeInfo(T) == .Void) return .{ .Void = {} };
-    inline for (@typeInfo(T).Struct.fields) |field| {
-        if (std.mem.eql(u8, field.name, field_name)) {
-            switch (@typeInfo(field.type)) {
-                .Int => return .{ .Int = @field(instance, field.name) },
-                .Float => return .{ .Float = @field(instance, field.name) },
-                .Bool => return .{ .Bool = @field(instance, field.name) },
-                .Pointer => |ptr| {
-                    if (ptr.size == .Slice) {
-                        switch (@typeInfo(ptr.child)) {
-                            .Int => |nfo| {
-                                if (nfo.bits == 8) {
-                                    return .{ .String = @field(instance, field.name) };
-                                }
-                                return .{ .Unsupported = {} };
-                            },
-                            .Float => {
-                                const slice = @field(instance, field.name);
-                                return .{ .Slice = .{
-                                    .ptr = @as([*]const u8, @alignCast(@ptrCast(slice.ptr))),
-                                    .len = slice.len,
-                                    .type = .Float,
-                                } };
-                            },
-                            else => return .{ .Unsupported = {} },
-                        }
-                    } else return .{ .Unsupported = {} };
-                },
-                else => return .{ .Unsupported = {} },
-            }
+    pub fn deinit(self: FieldValue) void {
+        switch (self) {
+            .Struct => |v| {
+                for (v.fields) |f| {
+                    v.allocator.free(f.name);
+                    f.value.deinit();
+                }
+                v.allocator.free(v.fields);
+            },
+            .Slice => |v| {
+                for (v.elements) |e| {
+                    e.deinit();
+                }
+                v.allocator.free(v.elements);
+            },
+            else => {},
         }
     }
-    return .{ .NotFound = field_name };
+};
+
+fn wrap_value(allocator: std.mem.Allocator, value: anytype) !FieldValue {
+    const T = @TypeOf(value);
+    switch (@typeInfo(T)) {
+        .Int => return .{ .Int = value },
+        .Float => return .{ .Float = value },
+        .Bool => return .{ .Bool = value },
+        .Pointer => |ptr| {
+            if (ptr.size == .Slice) {
+                switch (@typeInfo(ptr.child)) {
+                    .Int => |nfo| {
+                        if (nfo.bits == 8) {
+                            return .{ .String = value };
+                        }
+                        return .{ .Unsupported = {} };
+                    },
+                    else => {
+                        var elems = std.ArrayList(FieldValue).init(allocator);
+                        errdefer elems.deinit();
+                        for (value) |f| {
+                            try elems.append(try wrap_value(allocator, f));
+                        }
+                        return .{ .Slice = .{
+                            .allocator = allocator,
+                            .elements = try elems.toOwnedSlice(),
+                        } };
+                    },
+                }
+            } else return .{ .Unsupported = {} };
+        },
+        .Struct => {
+            var fields = std.ArrayList(StructFieldValue).init(allocator);
+            errdefer fields.deinit();
+            inline for (@typeInfo(T).Struct.fields) |field| {
+                try fields.append(.{
+                    .name = try allocator.dupe(u8, field.name),
+                    .value = try wrap_value(allocator, @field(value, field.name)),
+                });
+            }
+            return .{ .Struct = .{
+                .allocator = allocator,
+                .fields = try fields.toOwnedSlice(),
+            } };
+        },
+        else => return .{ .Unsupported = {} },
+    }
 }
 
 const TemplateElement = union(enum) {
     Static: []const u8,
-    Var: []const u8,
-    Iterator: void,
-    Section: []const u8,
-    End: []const u8,
-
-    pub fn format(value: TemplateElement, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
-        _ = fmt;
-        _ = options;
-        switch (value) {
-            .Static => |v| try writer.print("{s}", .{v}),
-            .Var => |v| try writer.print("{{{{{s}}}}}", .{v}),
-            .Iterator => try writer.print("{{{{.}}}}", .{}),
-            .Section => |v| try writer.print("{{{{#{s}}}}}", .{v}),
-            .End => |v| try writer.print("{{{{/{s}}}}}", .{v}),
-        }
-    }
+    Field: []const u8,
+    Iterator,
+    Section: struct { field: []const u8, children: []TemplateElement },
 };
 
 pub const Template = struct {
+    allocator: std.mem.Allocator,
+    elements: []TemplateElement,
+
+    pub fn deinit(self: Template) void {
+        for (self.elements) |elm| {
+            _deinit_child(self.allocator, elm);
+        }
+        self.allocator.free(self.elements);
+    }
+
+    fn _deinit_child(allocator: std.mem.Allocator, child: TemplateElement) void {
+        if (child == .Section) {
+            for (child.Section.children) |ch| {
+                _deinit_child(allocator, ch);
+            }
+            allocator.free(child.Section.children);
+        }
+    }
+
+    pub fn render(self: Template, data: anytype, writer: std.io.AnyWriter) !void {
+        const data_value = try wrap_value(self.allocator, data);
+        defer data_value.deinit();
+        try _render(self.elements, data_value, writer);
+    }
+
+    fn _get_child_field(value: FieldValue, name: []const u8) !StructFieldValue {
+        if (value == .Struct) {
+            for (value.Struct.fields) |f| {
+                if (std.mem.eql(u8, f.name, name)) {
+                    return f;
+                }
+            }
+        }
+        return error.NotAStruct;
+    }
+
+    fn _render(elements: []TemplateElement, data: FieldValue, writer: std.io.AnyWriter) !void {
+        for (elements) |elem| {
+            switch (elem) {
+                .Static => |v| try writer.print("{s}", .{v}),
+                .Field => |v| {
+                    const fv = try _get_child_field(data, v);
+                    try _render_value(fv.value, writer);
+                },
+                .Section => |v| {
+                    const fv = try _get_child_field(data, v.field);
+                    switch (fv.value) {
+                        .Bool => |b| {
+                            if (b) {
+                                try _render(v.children, data, writer);
+                            }
+                        },
+                        .Slice => |sl| {
+                            if (sl.elements.len > 0) {
+                                for (sl.elements) |el| {
+                                    try _render(v.children, el, writer);
+                                }
+                            }
+                        },
+                        else => return error.InvalidSectionType,
+                    }
+                },
+                .Iterator => {
+                    try _render_value(data, writer);
+                },
+            }
+        }
+    }
+
+    fn _render_value(value: FieldValue, writer: std.io.AnyWriter) !void {
+        switch (value) {
+            .String => |v| try writer.print("{s}", .{v}),
+            .Float => |v| try writer.print("{d:.2}", .{v}),
+            else => try writer.print("<HOLD>", .{}),
+        }
+    }
+};
+
+const ElementList = std.ArrayList(TemplateElement);
+
+const ParseBlock = struct {
+    tag: []const u8,
+    elements: ElementList,
+};
+
+const ElementStack = std.SinglyLinkedList(ParseBlock);
+const ElementStackNode = ElementStack.Node;
+
+const ParseContext = struct {
     const Self = @This();
 
     allocator: std.mem.Allocator,
-    template: []const u8,
-    elements: std.ArrayList(TemplateElement),
+    stack: ElementStack,
 
-    pub fn fromText(allocator: std.mem.Allocator, template: []const u8) !Template {
-        var elements = std.ArrayList(TemplateElement).init(allocator);
+    fn init(allocator: std.mem.Allocator) Self {
+        return .{ .allocator = allocator, .stack = .{} };
+    }
 
-        const st_tm = std.time.microTimestamp();
-        var pos: usize = 0;
-        while (pos < template.len) {
-            if (std.mem.indexOfPos(u8, template, pos, "{{")) |ts| {
-                if (ts > pos) {
-                    try elements.append(.{ .Static = template[pos..ts] });
-                }
-                if (std.mem.indexOfPos(u8, template, ts + 2, "}}")) |te| {
-                    const tag_text = template[ts + 2 .. te];
-                    if (tag_text.len == 1 and tag_text[0] == '.') {
-                        try elements.append(.{ .Iterator = {} });
-                    } else if (tag_text.len > 1 and tag_text[0] == '#') {
-                        try elements.append(.{ .Section = tag_text[1..] });
-                    } else if (tag_text.len > 0 and tag_text[0] == '/') {
-                        try elements.append(.{ .End = tag_text[1..] });
-                    } else {
-                        try elements.append(.{ .Var = tag_text });
-                    }
-                    pos = te + 2;
-                } else {
-                    return error.UnterminatedTag;
+    fn push(self: *Self, tag: []const u8) !void {
+        const node = try self.allocator.create(ElementStackNode);
+        node.*.data = .{
+            .tag = tag,
+            .elements = ElementList.init(self.allocator),
+        };
+        self.stack.prepend(node);
+    }
+
+    fn pop(self: *Self, tag: []const u8) !ElementList {
+        if (self.stack.first) |head| {
+            if (std.mem.eql(u8, head.*.data.tag, tag)) {
+                if (self.stack.popFirst()) |node| {
+                    const list = node.*.data.elements;
+                    self.allocator.destroy(node);
+                    return list;
+                } else return error.StackUnderflow;
+            } else {
+                std.log.debug("expected: [{s}], got: [{s}].", .{ tag, head.*.data.tag });
+                return error.MismatchedSegment;
+            }
+        } else return error.StackUnderflow;
+    }
+
+    fn append(self: *Self, element: TemplateElement) !void {
+        if (self.stack.first) |head| {
+            try head.*.data.elements.append(element);
+        } else {
+            return error.StackUnderflow;
+        }
+    }
+};
+
+pub fn from_text(allocator: std.mem.Allocator, source: []const u8) !Template {
+    var context = ParseContext.init(allocator);
+
+    try context.push("***");
+    _ = try _parse_segment(&context, 0, source);
+    var t = try context.pop("***");
+
+    if (context.stack.len() != 0) {
+        return error.NonTerminatedSegment;
+    }
+
+    return .{
+        .allocator = allocator,
+        .elements = try t.toOwnedSlice(),
+    };
+}
+
+fn _parse_segment(context: *ParseContext, start: usize, source: []const u8) !usize {
+    var pos = start;
+    while (pos < source.len) {
+        if (std.mem.indexOfPos(u8, source, pos, "{{")) |ts| {
+            if (pos < ts) {
+                try context.append(.{ .Static = source[pos..ts] });
+            }
+            pos = ts + 2;
+            if (std.mem.indexOfPos(u8, source, pos, "}}")) |te| {
+                switch (source[pos]) {
+                    '.' => {
+                        try context.append(.{ .Iterator = {} });
+                        pos = te + 2;
+                    },
+                    '#' => {
+                        const tag = source[pos + 1 .. te];
+                        try context.push(tag);
+                        pos = try _parse_segment(context, te + 2, source);
+                    },
+                    '/' => {
+                        const tag = source[pos + 1 .. te];
+                        var list = try context.pop(tag);
+                        try context.append(.{ .Section = .{
+                            .field = tag,
+                            .children = try list.toOwnedSlice(),
+                        } });
+                        return te + 2;
+                    },
+                    else => {
+                        try context.append(.{ .Field = source[pos..te] });
+                        pos = te + 2;
+                    },
                 }
             } else {
-                try elements.append(.{ .Static = template[pos..] });
-                break;
+                return error.NonTerminatedTag;
             }
+        } else {
+            break;
         }
-        const el_tm = std.time.microTimestamp() - st_tm;
-        std.log.debug("parsed in {}us", .{el_tm});
-
-        return .{
-            .template = template,
-            .elements = elements,
-        };
     }
-
-    pub fn deinit(self: *Self) void {
-        self.elements.deinit();
+    if (pos < source.len - 1) {
+        try context.append(.{ .Static = source[pos..] });
     }
+    return source.len;
+}
 
-    const SectionMarker = struct {
-        elem_idx: usize,
-        iter_idx: usize,
+test "render test" {
+    const expected =
+        \\here is some DATA.  enjoy.
+        \\123.00, 456.00, 789.00, 
+        \\TX:
+        \\mon: 100.00
+        \\tue: 50.00
+        \\
+    ;
+    var it_sec = [_]TemplateElement{
+        .{ .Iterator = {} },
+        .{ .Static = ", " },
+    };
+    var tx_sec = [_]TemplateElement{
+        .{ .Field = "desc" },
+        .{ .Static = ": " },
+        .{ .Field = "value" },
+        .{ .Static = "\n" },
+    };
+    var elms = [_]TemplateElement{
+        .{ .Static = "here is some " },
+        .{ .Field = "title" },
+        .{ .Static = ".  enjoy.\n" },
+        .{ .Section = .{
+            .field = "numbers",
+            .children = &it_sec,
+        } },
+        .{ .Static = "\nTX:\n" },
+        .{ .Section = .{
+            .field = "txs",
+            .children = &tx_sec,
+        } },
     };
 
-    const SectionStack = std.SinglyLinkedList(SectionMarker);
-    const SectionNode = SectionStack.Node;
+    const template = Template{
+        .allocator = std.testing.allocator,
+        .elements = &elms,
+    };
 
-    pub fn render(self: Self, T: type, data: T, writer: std.io.AnyWriter) !void {
-        var stack = SectionStack{};
+    const T = struct {
+        desc: []const u8,
+        value: f32,
+    };
 
-        const st_tm = std.time.microTimestamp();
-        var i: usize = 0;
-        // for (self.elements.items) |elem| {
-        while (i < self.elements.items.len) {
-            switch (self.elements.items[i]) {
-                .Static => |txt| try writer.writeAll(txt),
-                .Var => |tag| {
-                    switch (get_field_value(T, data, tag)) {
-                        .Void => {},
-                        .NotFound => |v| std.log.debug("field [{s}] not found.", .{v}),
-                        .Int => |v| try writer.print("{}", .{v}),
-                        .Float => |v| try writer.print("{d:.2}", .{v}),
-                        .Bool => |v| try writer.print("{}", .{v}),
-                        .String => |v| try writer.print("{s}", .{v}),
-                        .Slice => |v| {
-                            switch (v.type) {
-                                .Float => {
-                                    const p = @as([*]f32, @alignCast(@constCast(@ptrCast(v.ptr))));
-                                    for (0..v.len) |j| {
-                                        if (j > 0) try writer.print(",", .{});
-                                        try writer.print("{d:.2}", .{p[j]});
-                                    }
-                                },
-                            }
-                        },
-                        .Unsupported => std.log.err("!!{s}!! :: var of 'other' type", .{tag}),
-                    }
-                },
-                // .Iterator => {},
-                .Section => |sect| {
-                    // is this the "not first" time through here?
-                    switch (get_field_value(T, data, sect)) {
-                        .Slice => |v| {
-                            const node = try self.allocator.create(SectionNode);
-                            node.data = .{
-                                .elem_idx = i,
-                                .iter_idx = 0,
-                            };
-                            try stack.prepend(node);
-                            if (v.len == 0) {
-                                // skip rendering until the matching end
-                            }
-                            stack.prepend(node);
-                        },
-                        .Bool => |b| {
-                            if (!b) {
-                                // skip template rendering until the matching end
-                            }
-                        },
-                        else => std.log.err("unsupported section type of {s}", .{sect}),
-                    }
-                },
-                .End => |_| {
-                    // if we are in a section jump back to the beginning
-                },
-                else => std.log.err("can't render {} right now", .{self.elements.items[i]}),
-            }
-            i += 1;
-        }
-        const el_tm = std.time.microTimestamp() - st_tm;
-        std.log.debug("rendered in {}us", .{el_tm});
-    }
-};
+    const D = struct {
+        title: []const u8,
+        numbers: []const f32,
+        txs: []const T,
+    };
+    const data = D{
+        .title = "DATA",
+        .numbers = &[_]f32{ 123, 456, 789 },
+        .txs = &[_]T{
+            .{ .desc = "mon", .value = 100 },
+            .{ .desc = "tue", .value = 50 },
+        },
+    };
 
-const Data = struct {
-    string: []const u8 = undefined,
-    int1: usize = undefined,
-    float1: f32 = undefined,
-    slfl: []f32 = undefined,
-    cslfl: []const f32 = undefined,
-};
+    var buffer = std.ArrayList(u8).init(std.testing.allocator);
+    defer buffer.deinit();
 
-test "templ: void template" {
-    const expected = "this is a test";
-    var template = try Template.fromText(std.testing.allocator, expected);
-    defer template.deinit();
+    try template.render(data, buffer.writer().any());
 
-    var output_buffer = std.ArrayList(u8).init(std.testing.allocator);
-    defer output_buffer.deinit();
-
-    try template.render(void, {}, output_buffer.writer().any());
-
-    std.testing.expect(std.mem.eql(u8, expected, output_buffer.items)) catch {
-        const out = std.io.getStdOut().writer();
-        try out.print("expected:\n[{s}]\ngot:\n[{s}]\n.", .{ expected, output_buffer.items });
-        return error.UnexpectedTestResult;
+    std.testing.expect(std.mem.eql(u8, expected, buffer.items)) catch |err| {
+        std.log.err("got:\n[{s}]\nexpected:\n[{s}]", .{ buffer.items, expected });
+        return err;
     };
 }
 
-test "templ: basic" {
-    const data = Data{
-        .string = "string value",
-        .int1 = 42,
-        .float1 = std.math.pi,
-    };
-
-    const templ =
-        \\str: -->{{string}}<--
-        \\int1: -->{{int1}}<--
-        \\float1: -->{{float1}}<--
-    ;
-    const expected =
-        \\str: -->string value<--
-        \\int1: -->42<--
-        \\float1: -->3.14<--
+test "parse test" {
+    const template_source =
+        \\something{{field}}{{#s1}}{{.}}{{#s2}}{{f2}}{{/s2}}{{/s1}}something else.
     ;
 
-    var output_buffer = std.ArrayList(u8).init(std.testing.allocator);
-    defer output_buffer.deinit();
-
-    var template = try Template.fromText(std.testing.allocator, templ);
+    const template = try from_text(std.testing.allocator, template_source);
     defer template.deinit();
 
-    try template.render(Data, data, output_buffer.writer().any());
+    try std.testing.expect(template.elements.len == 4);
 
-    std.testing.expect(std.mem.eql(u8, expected, output_buffer.items)) catch {
-        const out = std.io.getStdOut().writer();
-        try out.print("expected:\n[{s}]\ngot:\n[{s}]\n.", .{ expected, output_buffer.items });
-        return error.UnexpectedTestResult;
-    };
-}
+    try std.testing.expect(template.elements[2] == .Section);
+    try std.testing.expect(template.elements[2].Section.children[0] == .Iterator);
 
-test "templ: slice of floats" {
-    const fls = [_]f32{ 123, 456, 789 };
-    const data = Data{
-        .string = "string value",
-        .int1 = 42,
-        .float1 = std.math.pi,
-        .cslfl = fls[0..],
-    };
-
-    const templ =
-        \\begin:
-        \\{{#cslfl}}
-        \\{{.}}
-        \\{{/cslfl}}
-        \\:end
-    ;
-    const expected =
-        \\begin:
-        \\123
-        \\456
-        \\789
-        \\:end
-    ;
-
-    var output_buffer = std.ArrayList(u8).init(std.testing.allocator);
-    defer output_buffer.deinit();
-
-    var template = try Template.fromText(std.testing.allocator, templ);
-    defer template.deinit();
-
-    try template.render(Data, data, output_buffer.writer().any());
-
-    std.testing.expect(std.mem.eql(u8, expected, output_buffer.items)) catch {
-        const out = std.io.getStdOut().writer();
-        try out.print("expected:\n[{s}]\ngot:\n[{s}]\n.", .{ expected, output_buffer.items });
-        return error.UnexpectedTestResult;
-    };
+    try std.testing.expect(template.elements[2].Section.children[1].Section.children[0] == .Field);
 }
