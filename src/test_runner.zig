@@ -13,11 +13,18 @@ pub fn main() !void {
     for (builtin.test_functions) |t| {
         run_count += 1;
 
+        const name = extractName(t);
+
+        std.testing.allocator_instance = .{};
+
         const start = std.time.milliTimestamp();
         const result = t.func();
         const elapsed = std.time.milliTimestamp() - start;
 
-        const name = extractName(t);
+        if (std.testing.allocator_instance.deinit() == .leak) {
+            try std.fmt.format(out, "{s} leaked memory\n", .{name});
+        }
+
         if (result) |_| {
             pass_count += 1;
             try std.fmt.format(out, "✅ {s} ({d}ms)\n", .{ name, elapsed });

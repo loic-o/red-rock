@@ -1,7 +1,6 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const http_server = @import("server.zig");
-const Template = @import("template.zig").Template;
 
 const log = std.log;
 
@@ -14,6 +13,7 @@ pub fn main() !void {
     var dashboard = try Dashboard.init(allocator);
     defer dashboard.deinit();
 
+    try server.handle_static("/js/util.js", @embedFile("static/util.js"));
     try server.handle("/", &dashboard, &Dashboard.handle);
 
     try server.serve();
@@ -24,18 +24,14 @@ const Dashboard = struct {
     const htmx = @embedFile("templ/index.htmx");
 
     allocator: Allocator,
-    template: Template,
 
     pub fn init(allocator: Allocator) !Self {
         return .{
             .allocator = allocator,
-            .template = try Template.fromText(allocator, htmx),
         };
     }
 
-    pub fn deinit(self: *Self) void {
-        self.template.deinit();
-    }
+    pub fn deinit(_: *Self) void {}
 
     pub fn handle(self: *Self, request: *std.http.Server.Request) void {
         self._handle(request) catch |err| {
@@ -44,13 +40,8 @@ const Dashboard = struct {
         };
     }
 
-    fn _handle(self: *Self, request: *std.http.Server.Request) !void {
-        var buffer = std.ArrayList(u8).init(self.allocator);
-        defer buffer.deinit();
-
-        try self.template.render(void, {}, buffer.writer().any());
-
-        try request.respond(buffer.items, .{
+    fn _handle(_: *Self, request: *std.http.Server.Request) !void {
+        try request.respond(htmx, .{
             .extra_headers = &.{
                 .{ .name = "content-type", .value = "text/html" },
             },

@@ -20,6 +20,7 @@ const Callback = union(enum) {
 
 addr: std.net.Address,
 routes: std.StringHashMap(Callback),
+static: std.StringHashMap([]const u8),
 
 pub fn init(allocator: std.mem.Allocator, config: Config) !Self {
     const addr = std.net.Address.resolveIp(config.ip, config.port) catch {
@@ -29,11 +30,19 @@ pub fn init(allocator: std.mem.Allocator, config: Config) !Self {
     return .{
         .addr = addr,
         .routes = std.StringHashMap(Callback).init(allocator),
+        .static = std.StringHashMap([]const u8).init(allocator),
     };
 }
 
 pub fn deinit(self: *Self) void {
     self.routes.deinit();
+    self.static.deinit();
+}
+
+pub fn handle_static(self: *Self, path: []const u8, source: []const u8) !void {
+    if (path.len == 0) return error.EmptyPath;
+    if (self.static.contains(path)) return error.AlreadyExists;
+    try self.static.put(path, source);
 }
 
 pub fn handle(self: *Self, path: []const u8, instance: *anyopaque, handler: anytype) !void {
@@ -114,7 +123,16 @@ fn handle_connection(self: Self, connection: std.net.Server.Connection) !void {
             ),
         }
     } else {
-        std.log.info("no route found for {s}.", .{request.head.target});
+        // std.log.info("no route found for {s}.", .{request.head.target});
+        if (self.static.get(request.head.target)) |st| {
+            try request.respond(st, .{
+                .extra_headers = &.{
+                    .{ .name = "content-type", .value = "application/javascript" },
+                },
+            });
+        } else {
+            try request.respond("target not found", .{ .status = .not_found });
+        }
     }
 
     // var send_buffer: [WRITE_BUFFER_SIZE]u8 = undefined;
