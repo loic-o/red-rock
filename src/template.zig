@@ -122,6 +122,7 @@ pub const Template = struct {
                 }
             }
         }
+        std.log.debug("field [{s}] parent not a struct", .{name});
         return error.NotAStruct;
     }
 
@@ -283,7 +284,7 @@ fn _parse_segment(context: *ParseContext, start: usize, source: []const u8) !usi
     return source.len;
 }
 
-test "render test" {
+test "templ: render test" {
     const expected =
         \\here is some DATA.  enjoy.
         \\123.00, 456.00, 789.00, 
@@ -352,7 +353,7 @@ test "render test" {
     };
 }
 
-test "parse test" {
+test "templ: parse test" {
     const template_source =
         \\something{{field}}{{#s1}}{{.}}{{#s2}}{{f2}}{{/s2}}{{/s1}}something else.
     ;

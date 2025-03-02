@@ -60,15 +60,20 @@ pub fn handle(self: *Self, path: []const u8, instance: *anyopaque, handler: anyt
     } });
 }
 
-pub fn serve(self: Self) !void {
+pub fn serve(self: *Self) !void {
     log.info("listening on {}", .{self.addr});
+
+    // note: server never gets deinit()'d here b/c this loop only ever terminates
+    // with a Ctrl+C.  so, the port stays in use for a while after program completion
+    // the link below shows how to capture this SIGINT...doing the rigth thing in
+    // the handler is another story - which i will address when it is too problematic
+    //
+    // if i want to "catch" a ctrl+c (in linux only)...
+    // https://www.reddit.com/r/Zig/comments/11mr0r8/defer_errdefer_and_sigint_ctrlc/
     var server = self.addr.listen(.{}) catch |err| {
         log.err("error listening on addr: {} - {}", .{ self.addr, err });
         return error.AddressListenError;
     };
-
-    // if i want to "catch" a ctrl+c (in linux only)...
-    // https://www.reddit.com/r/Zig/comments/11mr0r8/defer_errdefer_and_sigint_ctrlc/
 
     while (true) {
         const connection = server.accept() catch |err| {
@@ -93,8 +98,11 @@ const READ_BUFFER_SIZE = 8 * 1024;
 // const FILE_BUFFER_SIZE = 32 * 1024;
 
 /// this will close the connection when its done
-fn handle_connection(self: Self, connection: std.net.Server.Connection) !void {
-    defer connection.stream.close();
+fn handle_connection(self: *Self, connection: std.net.Server.Connection) !void {
+    defer {
+        connection.stream.close();
+        std.log.debug("connection closed.", .{});
+    }
 
     var read_buffer: [READ_BUFFER_SIZE]u8 = undefined;
     var http_server = std.http.Server.init(connection, &read_buffer);
