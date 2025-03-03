@@ -1,5 +1,6 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const Data = @import("budget.zig");
 const Server = @import("server.zig");
 const template = @import("template.zig");
 
@@ -35,6 +36,12 @@ pub fn main() !void {
     };
     defer allocator.free(data_dir);
     std.log.debug("data dir: {s}", .{data_dir});
+
+    std.log.info("loading data...", .{});
+    try Data.init(allocator, data_dir);
+    std.log.info("loading complete.", .{});
+
+    try Data.dump_data(std.io.getStdOut().writer());
 
     var server = try Server.init(allocator, .{});
     // server_ref = &server;
@@ -78,7 +85,7 @@ const Dashboard = struct {
         var buffer = std.ArrayList(u8).init(self.allocator);
         defer buffer.deinit();
 
-        const Data = struct {
+        const TestData = struct {
             budget: []const f32,
             actual: []const f32,
         };
@@ -86,7 +93,7 @@ const Dashboard = struct {
         const budget = [_]f32{ 485.50, 5631.67, 1483.10, 2887.91, 1683.16, 5328.10, 5237.55, 5915.21, 887.00, 3734.41, 3127.81, 1459.79 };
         const actual = [_]f32{ 3375.73, 4443.81, 3360.66, 5385.53, 3333.24, 4907.49, 5034.22, 5194.89, 4759.88 };
 
-        const data = Data{
+        const data = TestData{
             .budget = &budget,
             .actual = &actual,
         };

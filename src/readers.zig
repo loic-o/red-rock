@@ -109,6 +109,7 @@ pub fn WorksheetIterator(ReaderType: type) type {
         line_buffer: std.ArrayList(u8),
         amt_buffer: [12]f32 = undefined,
         complete: bool = false,
+        current_line: usize = 0,
 
         pub fn init(allocator: std.mem.Allocator, reader: ReaderType) !Self {
             var self: Self = .{
@@ -130,6 +131,7 @@ pub fn WorksheetIterator(ReaderType: type) type {
 
         pub fn next(self: *Self) !?WorksheetLineItem {
             if (self.complete) return null;
+            self.current_line += 1;
 
             self.line_buffer.clearRetainingCapacity();
             self.reader.streamUntilDelimiter(self.line_buffer.writer(), '\n', null) catch |err| switch (err) {
@@ -137,11 +139,18 @@ pub fn WorksheetIterator(ReaderType: type) type {
                 else => return err,
             };
 
+            if (std.mem.trim(u8, self.line_buffer.items, " ").len == 0) {
+                return null;
+            }
+
             var ws_item = WorksheetLineItem{
                 .amounts = self.amt_buffer[0..],
             };
 
-            var p = std.mem.indexOfScalar(u8, self.line_buffer.items, ',') orelse return error.InvalidFormat;
+            var p = std.mem.indexOfScalar(u8, self.line_buffer.items, ',') orelse {
+                std.log.debug("failed to locate category on line:\n{} | {s}", .{ self.current_line, self.line_buffer.items });
+                return error.InvalidFormat;
+            };
             ws_item.category = self.line_buffer.items[0..p];
             p += 1;
 
@@ -151,7 +160,19 @@ pub fn WorksheetIterator(ReaderType: type) type {
 
             for (0..12) |i| {
                 e = std.mem.indexOfScalarPos(u8, self.line_buffer.items, p, ',') orelse return error.InvalidFormat;
-                self.amt_buffer[i] = try std.fmt.parseFloat(f32, self.line_buffer.items[p + 1 .. e]);
+                if (e == p) {
+                    self.amt_buffer[i] = 0.0;
+                } else {
+                    const t = std.mem.trim(u8, self.line_buffer.items[p + 1 .. e], " ");
+                    if (t.len == 0) {
+                        self.amt_buffer[i] = 0.0;
+                    } else {
+                        self.amt_buffer[i] = std.fmt.parseFloat(f32, t) catch |err| {
+                            std.log.debug("failed to parse [{s}] ({},{})", .{ t, p, e });
+                            return err;
+                        };
+                    }
+                }
                 p = e + 1;
             }
 
@@ -164,7 +185,7 @@ test "worksheet test" {
     const test_data =
         \\Category,Purpose,January,Feb,Mar,etc...
         \\Utilities,Because,$20.00,$21.00,$22.00,$23.00,$24.00,$25.00,$26.00,$27.00,$28.00,$29.00,$30.00,$31.00,,,,,
-        \\Groceries,For the Food,$30.00,$31.00,$32.00,$33.00,$34.00,$35.00,$36.00,$37.00,$38.00,$39.00,$40.00,$41.00,,,,,
+        \\Groceries,For the Food,$30.00,$31.00,$32.00,$33.00,$34.00,,$36.00,$37.00,$38.00,$39.00,$40.00,$41.00,,,,,
         \\Travel,For the Fun,$40.00,$41.00,$42.00,$43.00,$44.00,$45.00,$46.00,$47.00,$48.00,$49.00,$50.00,$51.00,,,,,
     ;
 
