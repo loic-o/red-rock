@@ -1,47 +1,49 @@
 const std = @import("std");
 
-const Date = @import("util.zig").Date;
-const parse_date = @import("util.zig").parse_date;
+const Date = @import("types.zig").Date;
+const Transaction = @import("types.zig").Transaction;
+const WorksheetLineItem = @import("types.zig").WorksheetLineItem;
 
-pub const Transaction = struct {
-    date: Date,
-    account: []const u8,
-    description: []const u8,
-    category: []const u8,
-    tags: ?[]const u8,
-    amount: f32,
+pub fn CsvTransactionIterator(ReaderType: type) type {
+    return struct {
+        const Self = @This();
 
-    pub fn format(
-        self: Transaction,
-        comptime fmt: []const u8,
-        options: std.fmt.FormatOptions,
-        writer: anytype,
-    ) !void {
-        _ = fmt;
-        _ = options;
-        try writer.print("{s} [{s}] [{s}] {d:.2}", .{
-            self.date,
-            self.account,
-            self.category,
-            self.amount,
-        });
-    }
-};
+        allocator: std.mem.Allocator,
+        reader: ReaderType,
+        line_buffer: std.ArrayList(u8),
+        complete: bool = false,
+        current_line: usize = 1,
 
-pub const CsvTransactionIterator = struct {
-    buffer: []const u8,
-    line_it: ?std.mem.TokenIterator(u8, .scalar) = null,
-
-    const Self = @This();
-
-    pub fn next(self: *Self) ?Transaction {
-        if (self.line_it == null) {
-            self.line_it = std.mem.tokenizeScalar(u8, self.buffer, '\n');
-            _ = self.line_it.?.next(); // skip header line
+        pub fn init(allocator: std.mem.Allocator, reader: ReaderType) !Self {
+            var self: Self = .{
+                .allocator = allocator,
+                .reader = reader,
+                .line_buffer = std.ArrayList(u8).init(allocator),
+            };
+            reader.streamUntilDelimiter(self.line_buffer.writer(), '\n', null) catch |err| {
+                std.log.err("error reading header line", .{});
+                return err;
+            };
+            return self;
         }
 
-        if (self.line_it.?.next()) |line| {
-            const date = parse_date(line[0..10]) catch |err| {
+        pub fn deinit(self: *Self) void {
+            self.line_buffer.deinit();
+        }
+
+        pub fn next(self: *Self) !?Transaction {
+            if (self.complete) return null;
+            self.current_line += 1;
+
+            self.line_buffer.clearRetainingCapacity();
+            self.reader.streamUntilDelimiter(self.line_buffer.writer(), '\n', null) catch |err| switch (err) {
+                error.EndOfStream => self.complete = true,
+                else => return err,
+            };
+
+            const line = self.line_buffer.items;
+
+            const date = Date.parse_date(line[0..10]) catch |err| {
                 std.debug.print("\ndate formatting error ([{s}]): {}\n", .{ line[0..10], err });
                 return null;
             };
@@ -88,17 +90,9 @@ pub const CsvTransactionIterator = struct {
                 .tags = tags,
                 .amount = amount,
             };
-        } else {
-            return null;
         }
-    }
-};
-
-pub const WorksheetLineItem = struct {
-    category: []const u8 = undefined,
-    description: []const u8 = undefined,
-    amounts: []f32 = undefined,
-};
+    };
+}
 
 pub fn WorksheetIterator(ReaderType: type) type {
     return struct {

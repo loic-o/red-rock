@@ -41,7 +41,7 @@ pub fn main() !void {
     try Data.init(allocator, data_dir);
     std.log.info("loading complete.", .{});
 
-    try Data.dump_data(std.io.getStdOut().writer());
+    // try Data.dump_data(std.io.getStdOut().writer());
 
     var server = try Server.init(allocator, .{});
     // server_ref = &server;
@@ -90,12 +90,23 @@ const Dashboard = struct {
             actual: []const f32,
         };
 
-        const budget = [_]f32{ 485.50, 5631.67, 1483.10, 2887.91, 1683.16, 5328.10, 5237.55, 5915.21, 887.00, 3734.41, 3127.81, 1459.79 };
-        const actual = [_]f32{ 3375.73, 4443.81, 3360.66, 5385.53, 3333.24, 4907.49, 5034.22, 5194.89, 4759.88 };
+        const connection = try Data.connect();
+
+        // const budget = [_]f32{ 485.50, 5631.67, 1483.10, 2887.91, 1683.16, 5328.10, 5237.55, 5915.21, 887.00, 3734.41, 3127.81, 1459.79 };
+        // const actual = [_]f32{ 3375.73, 4443.81, 3360.66, 5385.53, 3333.24, 4907.49, 5034.22, 5194.89, 4759.88 };
+        const budget = connection.get_monthly_totals();
+        var actual = connection.get_monthly_actuals();
+
+        for (0..actual.len) |i| {
+            actual[i] *= -1;
+        }
+        // NOTE: not happy about this (or possibly the return value of get_monthly_actuals).  prob need
+        // to get current date.  maybe: https://github.com/FObersteiner/zdt
+        const lm = std.mem.indexOfScalar(f32, &actual, 0) orelse 11;
 
         const data = TestData{
             .budget = &budget,
-            .actual = &actual,
+            .actual = actual[0..lm],
         };
 
         const writer = buffer.writer().any();
