@@ -107,39 +107,45 @@ fn handle_connection(self: *Self, connection: std.net.Server.Connection) !void {
     var read_buffer: [READ_BUFFER_SIZE]u8 = undefined;
     var http_server = std.http.Server.init(connection, &read_buffer);
 
-    // ignoring 'keep-alive' request unless/until i want to tackle more complex threading
-    var request = try http_server.receiveHead();
+    var keep_alive = true;
+    while (keep_alive) {
+        var request = http_server.receiveHead() catch |err| switch (err) {
+            error.HttpConnectionClosing => break,
+            else => return err,
+        };
+        keep_alive = request.head.keep_alive;
 
-    log.info("{s} - {s} ({})", .{
-        method_to_slice(request.head.method),
-        request.head.target,
-        connection.address,
-    });
+        log.info("{s} - {s} ({})", .{
+            method_to_slice(request.head.method),
+            request.head.target,
+            connection.address,
+        });
 
-    const route = self.routes.get(request.head.target);
+        const route = self.routes.get(request.head.target);
 
-    if (route) |rte| {
-        switch (rte) {
-            .unbound => |ub| ub(&request),
-            .bound => |b| @call(
-                .auto,
-                @as(BoundHandler, @ptrFromInt(b.handler)),
-                .{
-                    @as(*anyopaque, @ptrFromInt(b.instance)),
-                    &request,
-                },
-            ),
-        }
-    } else {
-        // std.log.info("no route found for {s}.", .{request.head.target});
-        if (self.static.get(request.head.target)) |st| {
-            try request.respond(st, .{
-                .extra_headers = &.{
-                    .{ .name = "content-type", .value = "application/javascript" },
-                },
-            });
+        if (route) |rte| {
+            switch (rte) {
+                .unbound => |ub| ub(&request),
+                .bound => |b| @call(
+                    .auto,
+                    @as(BoundHandler, @ptrFromInt(b.handler)),
+                    .{
+                        @as(*anyopaque, @ptrFromInt(b.instance)),
+                        &request,
+                    },
+                ),
+            }
         } else {
-            try request.respond("target not found", .{ .status = .not_found });
+            // std.log.info("no route found for {s}.", .{request.head.target});
+            if (self.static.get(request.head.target)) |st| {
+                try request.respond(st, .{
+                    .extra_headers = &.{
+                        .{ .name = "content-type", .value = "application/javascript" },
+                    },
+                });
+            } else {
+                try request.respond("target not found", .{ .status = .not_found });
+            }
         }
     }
 
