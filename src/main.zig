@@ -50,8 +50,6 @@ pub fn main() !void {
     var dashboard = try Dashboard.init(allocator);
     defer dashboard.deinit();
 
-    try server.handle_static("/js/util.js", @embedFile("static/util.js"));
-    try server.handle_static("/js/my_file.js", @embedFile("static/my_file.js"));
     try server.handle("/", &dashboard, &Dashboard.handle);
 
     try server.serve();
@@ -118,7 +116,7 @@ const Dashboard = struct {
 
         try request.respond(buffer.items, .{
             .extra_headers = &.{
-                .{ .name = "content-type", .value = "text/html" },
+                .{ .name = "content-type", .value = "text/html; charset=utf-8" },
             },
         });
     }

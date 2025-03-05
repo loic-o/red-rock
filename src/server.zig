@@ -20,7 +20,6 @@ const Callback = union(enum) {
 
 addr: std.net.Address,
 routes: std.StringHashMap(Callback),
-static: std.StringHashMap([]const u8),
 server: std.net.Server = undefined,
 running: std.atomic.Value(bool),
 
@@ -36,7 +35,6 @@ pub fn init(allocator: std.mem.Allocator, config: Config) !Self {
     return .{
         .addr = addr,
         .routes = std.StringHashMap(Callback).init(allocator),
-        .static = std.StringHashMap([]const u8).init(allocator),
         .running = std.atomic.Value(bool).init(true),
         .server = srvr,
     };
@@ -62,13 +60,6 @@ pub fn shutdown(self: *Self) void {
 pub fn deinit(self: *Self) void {
     std.log.debug("server cleaning up.", .{});
     self.routes.deinit();
-    self.static.deinit();
-}
-
-pub fn handle_static(self: *Self, path: []const u8, source: []const u8) !void {
-    if (path.len == 0) return error.EmptyPath;
-    if (self.static.contains(path)) return error.AlreadyExists;
-    try self.static.put(path, source);
 }
 
 pub fn handle(self: *Self, path: []const u8, instance: *anyopaque, handler: anytype) !void {
@@ -155,44 +146,49 @@ fn handle_connection(self: *Self, connection: std.net.Server.Connection) !void {
                 ),
             }
         } else {
-            // std.log.info("no route found for {s}.", .{request.head.target});
-            if (self.static.get(request.head.target)) |st| {
-                try request.respond(st, .{
-                    .extra_headers = &.{
-                        .{ .name = "content-type", .value = "application/javascript" },
-                    },
-                });
-            } else {
-                try request.respond("target not found", .{ .status = .not_found });
-            }
+            handle_static(self, &request) catch |err| switch (err) {
+                std.fs.File.OpenError.FileNotFound => try request.respond("oops", .{ .status = .not_found }),
+                else => return err,
+            };
         }
     }
+}
 
-    // var send_buffer: [WRITE_BUFFER_SIZE]u8 = undefined;
+const WRITE_BUFFER_SIZE: usize = 8 * 1024;
+const FILE_BUFFER_SIZE: usize = 8 * 1024;
 
-    // var response = request.respondStreaming(
-    //     .{
-    //         .send_buffer = &send_buffer,
-    //         .respond_options = .{
-    //             .extra_headers = &.{
-    //                 .{ .name = "Content-Type", .value = "text/html" },
-    //             },
-    //         },
-    //     },
-    // );
+fn handle_static(_: *Self, request: *std.http.Server.Request) !void {
+    var send_buffer: [WRITE_BUFFER_SIZE]u8 = undefined;
+    var file_buffer: [FILE_BUFFER_SIZE]u8 = undefined;
 
-    // var file_buffer: [FILE_BUFFER_SIZE]u8 = undefined;
-    // const f = try std.fs.cwd().openFile("html/index.html", .{
-    //     .mode = .read_only,
-    // });
-    // defer f.close();
+    std.mem.copyForwards(u8, &file_buffer, "src");
+    std.mem.copyForwards(u8, file_buffer[3..], request.head.target);
+    const file_path = file_buffer[0 .. request.head.target.len + 3];
 
-    // var l: usize = std.math.maxInt(usize);
-    // while (l >= FILE_BUFFER_SIZE) {
-    //     l = try f.read(&file_buffer);
-    //     _ = try response.write(file_buffer[0..l]);
-    // }
-    // _ = try response.flush();
-    // _ = try response.end();
+    const f = std.fs.cwd().openFile(file_path, .{
+        .mode = .read_only,
+    }) catch |err| {
+        std.log.debug("{}: trying to server static: {s}", .{ err, file_path });
+        return err;
+    };
+    defer f.close();
 
+    var response = request.respondStreaming(
+        .{
+            .send_buffer = &send_buffer,
+            .respond_options = .{
+                .extra_headers = &.{
+                    .{ .name = "Content-Type", .value = "application/javascript; charset=utf-8" },
+                },
+            },
+        },
+    );
+
+    var l: usize = std.math.maxInt(usize);
+    while (l >= FILE_BUFFER_SIZE) {
+        l = try f.read(&file_buffer);
+        _ = try response.write(file_buffer[0..l]);
+    }
+    _ = try response.flush();
+    _ = try response.end();
 }
