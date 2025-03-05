@@ -81,6 +81,7 @@ const Dashboard = struct {
 
         const templ = try tf.readToEndAlloc(self.allocator, 8 * 1024 * 1024);
         self.template = try template.from_text(self.allocator, templ);
+        self.templ_text = templ;
         self.template_ts = std.time.nanoTimestamp();
     }
 
