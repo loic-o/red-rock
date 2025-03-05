@@ -59,33 +59,57 @@ pub fn main() !void {
 
 const Dashboard = struct {
     const Self = @This();
-    const htmx = @embedFile("templ/index.html");
+    // const htmx = @embedFile("templ/index.html");
+    const htmx_file = "src/templ/index.html";
 
     allocator: Allocator,
-    template: template.Template,
+    templ_text: []const u8 = undefined,
+    template: template.Template = undefined,
+    template_ts: i128 = undefined,
 
     pub fn init(allocator: Allocator) !Self {
-        const templ = try template.from_text(allocator, htmx);
-        return .{
+        var self = Self{
             .allocator = allocator,
-            .template = templ,
         };
+        try self.load_template();
+        return self;
+    }
+
+    fn load_template(self: *Self) !void {
+        const tf = try std.fs.cwd().openFile(htmx_file, .{ .mode = .read_only });
+        defer tf.close();
+
+        const templ = try tf.readToEndAlloc(self.allocator, 8 * 1024 * 1024);
+        self.template = try template.from_text(self.allocator, templ);
+        self.template_ts = std.time.nanoTimestamp();
     }
 
     pub fn deinit(self: *Self) void {
         self.template.deinit();
+        self.allocator.free(self.templ_text);
     }
 
     pub fn handle(self: *Self, request: *std.http.Server.Request) void {
         self._handle(request) catch |err| {
             // do some error page?
             std.log.err("error handling request: {}", .{err});
+            request.respond("something went wrongly.", .{ .status = .internal_server_error }) catch {};
         };
+    }
+
+    fn _verify_template(self: *Self) !void {
+        const tf = try std.fs.cwd().openFile(htmx_file, .{ .mode = .read_only });
+        const stat = try tf.stat();
+        tf.close();
+        if (self.template_ts < stat.mtime) {
+            try self.load_template();
+        }
     }
 
     fn _handle(self: *Self, request: *std.http.Server.Request) !void {
         var buffer = std.ArrayList(u8).init(self.allocator);
         defer buffer.deinit();
+        try self._verify_template();
 
         const TestData = struct {
             budget: []const f32,
