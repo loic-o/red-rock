@@ -3,8 +3,8 @@
 
   // swiped from Chart.js utils: https://www.chartjs.org/docs/latest/samples/utils.html
   util.valueOrDefault = function (value, defaultValue) {
-    return typeof value == 'undefined' ? defaultValue : value;
-  }
+    return typeof value == "undefined" ? defaultValue : value;
+  };
 
   var _seed = Date.now();
 
@@ -13,7 +13,7 @@
     max = util.valueOrDefault(max, 0);
     _seed = (_seed * 9301 + 49297) % 233280;
     return min + (_seed / 233280) * (max - min);
-  }
+  };
 
   util.numbers = function (config) {
     var cfg = config || {};
@@ -36,8 +36,7 @@
       }
     }
     return data;
-  }
+  };
 
   M.util = util;
 })(this);
-

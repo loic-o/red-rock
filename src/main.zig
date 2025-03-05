@@ -6,25 +6,25 @@ const template = @import("template.zig");
 
 const log = std.log;
 
-// var server_ref: ?*Server = null;
-// fn sigint_handler(sig: c_int) callconv(.C) void {
-//     std.debug.print("SIGINT ({}) received\n", .{sig});
-//     if (server_ref) |srvr| {
-//         // this causes a panic from within the accept() call...
-//         srvr.deinit();
-//     }
-// }
+var server_ref: ?*Server = null;
+fn sigint_handler(sig: c_int) callconv(.C) void {
+    std.debug.print("SIGINT ({}) received\n", .{sig});
+    if (server_ref) |srvr| {
+        srvr.shutdown();
+    }
+}
 
 pub fn main() !void {
     // Manage the Ctrl + C
-    // const act = std.os.linux.Sigaction{
-    //     .handler = .{ .handler = sigint_handler },
-    //     .mask = std.os.linux.empty_sigset,
-    //     .flags = 0,
-    // };
-    // if (std.os.linux.sigaction(std.os.linux.SIG.INT, &act, null) != 0) {
-    //     return error.SignalHandlerError;
-    // }
+    // https://www.reddit.com/r/Zig/comments/11mr0r8/defer_errdefer_and_sigint_ctrlc/
+    const act = std.os.linux.Sigaction{
+        .handler = .{ .handler = sigint_handler },
+        .mask = std.os.linux.empty_sigset,
+        .flags = 0,
+    };
+    if (std.os.linux.sigaction(std.os.linux.SIG.INT, &act, null) != 0) {
+        return error.SignalHandlerError;
+    }
 
     var GPA = std.heap.GeneralPurposeAllocator(.{}){};
     const allocator = GPA.allocator();
@@ -44,20 +44,24 @@ pub fn main() !void {
     // try Data.dump_data(std.io.getStdOut().writer());
 
     var server = try Server.init(allocator, .{});
-    // server_ref = &server;
+    defer server.deinit();
+    server_ref = &server;
 
     var dashboard = try Dashboard.init(allocator);
     defer dashboard.deinit();
 
     try server.handle_static("/js/util.js", @embedFile("static/util.js"));
+    try server.handle_static("/js/my_file.js", @embedFile("static/my_file.js"));
     try server.handle("/", &dashboard, &Dashboard.handle);
 
     try server.serve();
+
+    std.log.debug("returned from serve() loop.", .{});
 }
 
 const Dashboard = struct {
     const Self = @This();
-    const htmx = @embedFile("templ/index.htmx");
+    const htmx = @embedFile("templ/index.html");
 
     allocator: Allocator,
     template: template.Template,

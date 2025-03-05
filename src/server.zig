@@ -21,20 +21,46 @@ const Callback = union(enum) {
 addr: std.net.Address,
 routes: std.StringHashMap(Callback),
 static: std.StringHashMap([]const u8),
+server: std.net.Server = undefined,
+running: std.atomic.Value(bool),
 
 pub fn init(allocator: std.mem.Allocator, config: Config) !Self {
     const addr = std.net.Address.resolveIp(config.ip, config.port) catch {
         log.err("error parsing address", .{});
         return error.AddressParseError;
     };
+    const srvr = addr.listen(.{ .reuse_port = true }) catch |err| {
+        log.err("error listening on addr: {} - {}", .{ addr, err });
+        return error.AddressListenError;
+    };
     return .{
         .addr = addr,
         .routes = std.StringHashMap(Callback).init(allocator),
         .static = std.StringHashMap([]const u8).init(allocator),
+        .running = std.atomic.Value(bool).init(true),
+        .server = srvr,
     };
 }
 
+pub fn shutdown(self: *Self) void {
+    // this will get the serve loop to end once it deals with the next connection
+    self.running.store(false, .seq_cst);
+    // we will gitve it another connection to force that to happen
+    std.log.debug("sending terminating request", .{});
+    const c: ?std.net.Stream = std.net.tcpConnectToAddress(self.addr) catch blk: {
+        // probably fine...for now assume its because the to loop ended already by way of another connection...
+        std.log.debug("terminating request FAILED.", .{});
+        break :blk null;
+    };
+    if (c) |cc| {
+        std.log.debug("connected...", .{});
+        std.time.sleep(std.time.ns_per_s / 2);
+        cc.close();
+    }
+}
+
 pub fn deinit(self: *Self) void {
+    std.log.debug("server cleaning up.", .{});
     self.routes.deinit();
     self.static.deinit();
 }
@@ -63,29 +89,22 @@ pub fn handle(self: *Self, path: []const u8, instance: *anyopaque, handler: anyt
 pub fn serve(self: *Self) !void {
     log.info("listening on {}", .{self.addr});
 
-    // note: server never gets deinit()'d here b/c this loop only ever terminates
-    // with a Ctrl+C.  so, the port stays in use for a while after program completion
-    // the link below shows how to capture this SIGINT...doing the rigth thing in
-    // the handler is another story - which i will address when it is too problematic
-    //
-    // if i want to "catch" a ctrl+c (in linux only)...
-    // https://www.reddit.com/r/Zig/comments/11mr0r8/defer_errdefer_and_sigint_ctrlc/
-    var server = self.addr.listen(.{}) catch |err| {
-        log.err("error listening on addr: {} - {}", .{ self.addr, err });
-        return error.AddressListenError;
-    };
-
-    while (true) {
-        const connection = server.accept() catch |err| {
+    while (self.running.load(.seq_cst)) {
+        const connection = self.server.accept() catch |err| {
             log.err("connection accept error - {}", .{err});
             return error.ConnectionAcceptError;
         };
 
-        const thread = try std.Thread.spawn(.{}, handle_connection, .{ self, connection });
-        thread.detach();
+        if (self.running.load(.seq_cst)) {
+            const thread = try std.Thread.spawn(.{}, handle_connection, .{ self, connection });
+            thread.detach();
+        } else {
+            std.log.debug("ignoring latest request due to shutdown request.", .{});
+            connection.stream.close();
+        }
     }
-
-    std.debug.assert(false);
+    self.server.deinit();
+    std.log.debug("returning from serve", .{});
 }
 
 inline fn method_to_slice(method: std.http.Method) []const u8 {
